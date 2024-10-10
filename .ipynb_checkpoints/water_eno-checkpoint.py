@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 from pyscf import gto, scf, mp, cc
-from pyscf.tdscf.rhf import CIS
 from pyscf.cc.eom_rccsd import EOMIP, EOMEA, EOMEESinglet
 import numpy as np
 from functools import reduce
-
-einsum = np.einsum
 
 def make_fno(dm, mo_energy, mo_coeff, nvir_act):
     n, v = np.linalg.eigh(dm)
@@ -26,77 +23,44 @@ def get_delta_emp2(mymp, mymf, frozen, no_coeff):
     delta_emp2 = mymp.e_corr - pt_no.e_corr
     return delta_emp2
 
-def ip_eom_dm(t1, t2, r1, r2, l1, l2):
-    lab = 0.5 * einsum('ija,ijb->ab', l2, r2)
-    y1ia = einsum('ija,j->ia', l2, r1)
-    yab  = 0.5 * (lab - einsum('ia,ib->ab', y1ia, t1))
-    yab += 0.5 * (lab.transpose(1, 0) - einsum('ib,ia->ab', y1ia, t1))
-    return yab
-
-def ea_eom_dm(t1, t2, r1, r2, l1, l2):
-    lab = einsum('iac,ibc->ab', l2, r2)
-    y1ia = einsum('iac,c->ia', l2, r1)
-    yab  = 0.5 * (einsum('a,b->ab', l1, r1) + lab - einsum('ia,ib->ab', y1ia, t1))
-    yab += 0.5 * (einsum('b,a->ab', l1, r1) + lab.transpose(1, 0) - einsum('ib,ia->ab', y1ia, t1))
-    return yab
-
 mol = gto.Mole()
 mol.atom = '''
     O   0.0000000   0.0000000   0.1177930
     H   0.0000000   0.7554150   -0.4711740
     H   0.0000000   -0.7554150  -0.4711740
 '''
-mol.basis = 'ccpvdz'
+mol.basis = 'ccpvtz'
 mol.verbose = 7
 mol.build()
 
 mymf = scf.RHF(mol)
 mymf.kernel()
-mo_energy = mymf.mo_energy
-mo_coeff = mymf.mo_coeff
-
-# MP DM
-
-mymp = mp.RMP2(mymf)
-emp2, t2 = mymp.kernel()
-mpdm = mymp.make_rdm1(t2=t2)
-
-# NTOs
-
-mycis = CIS(mymf)
-ecis, xy = mycis.kernel()
-weights, nto_coeff = mycis.get_nto()
-
-# EOM-DM
 
 mymp = cc.rccsd.RCCSD(mymf)
 eris = mymp.ao2mo()
-emp2, t1, t2 = mymp.kernel(eris=eris, mbpt2=True)
+emp2, _, t2 = mymp.kernel(eris=eris, mbpt2=True)
 nocc = mymp.nocc
 nmo = mymp.nmo
 nvir = nmo - nocc
+mo_energy = mymf.mo_energy
+mo_coeff = mymf.mo_coeff
 
 myeom = EOMIP(mymp)
 myeom.partition = 'mp'
 eomipmpe, ipv = myeom.kernel(eris=eris, partition='mp')
 r1, r2 = myeom.vector_to_amplitudes(ipv, nmo, nocc)
-leomipmpe, lipv = myeom.kernel(left=True, eris=eris, partition='mp')
-l1, l2 = myeom.vector_to_amplitudes(lipv, nmo, nocc)
-ipdm  = ip_eom_dm(t1, t2, r1, r2, l1, l2)
+l2 = r2.conj()
+ipdm  = 2 * np.einsum('ija,ijb->ba', l2, r2)
+ipdm -=     np.einsum('ija,ijb->ba', l2, r2)
 
 myeom = EOMEA(mymp)
 myeom.partition = 'mp'
 eomeampe, eav = myeom.kernel(eris=eris, partition='mp')
 r1, r2 = myeom.vector_to_amplitudes(eav, nmo, nocc)
-leomeampe, lav = myeom.kernel(left=True, eris=eris, partition='mp')
-l1, l2 = myeom.vector_to_amplitudes(lav, nmo, nocc)
-eadm  = ea_eom_dm(t1, t2, r1, r2, l1, l2)
+l2 = r2.conj()
+eadm  = 2 * np.einsum('ica,icb->ba', l2, r2)
+eadm -=     np.einsum('ica,ibc->ba', l2, r2)
 
-# Combined DMs
-mp_ip_dm = mpdm + ipdm
-mp_ea_dm = mpdm + eadm
-
-"""
 myeom = EOMEESinglet(mymp)
 myeom.partition = 'mp'
 eomeempe, eev = myeom.kernel(eris=eris)
@@ -104,7 +68,6 @@ r1, r2 = myeom.vector_to_amplitudes(eev, nmo, nocc)
 l2 = r2.conj()
 eedm  = 2 * np.einsum('ijca,ijcb->ba', l2, r2)
 eedm -=     np.einsum('ijca,ijbc->ba', l2, r2)
-"""
 
 results = []
 for nvir_act in range(1, nvir):
@@ -144,7 +107,7 @@ for nvir_act in range(1, nvir):
     eccsd, t1, t2 = mycc.kernel(eris=eris)
     myeom = EOMEA(mycc)
     eae, eav = myeom.kernel(eris=eris)
-    """
+
     no_coeff = make_fno(eedm, mo_energy, mo_coeff, nvir_act)
     ee_delta_emp2 = get_delta_emp2(mymp, mymf, frozen, no_coeff)
     # Calculate delta EOM-MP2 correction
@@ -161,8 +124,7 @@ for nvir_act in range(1, nvir):
     eccsd, t1, t2 = mycc.kernel(eris=eris)
     myeom = EOMEESinglet(mycc)
     eee, eev = myeom.kernel(eris=eris)
-    """
-    results.append((nvir_act, ip_delta_emp2, delta_eomipmpe, ipe, ipe+delta_eomipmpe, ea_delta_emp2, delta_eomeampe, eae, eae+delta_eomeampe))
+    results.append((nvir_act, ip_delta_emp2, delta_eomipmpe, ipe, ipe+delta_eomipmpe, ea_delta_emp2, delta_eomeampe, eae, eae+delta_eomeampe, ee_delta_emp2, delta_eomeempe, eee, eee+delta_eomeempe))
 
 mycc = cc.RCCSD(mymf)
 eris = mycc.ao2mo()
@@ -171,19 +133,17 @@ myeom = EOMIP(mycc)
 ipe, ipv = myeom.kernel(eris=eris)
 myeom = EOMEA(mycc)
 eae, eav = myeom.kernel(eris=eris)
-"""
 myeom = EOMEESinglet(mycc)
 eee, eev = myeom.kernel(eris=eris)
-"""
-results.append((nvir, 0, 0, ipe, ipe, 0, 0, eae, eae))
+results.append((nvir, 0, 0, ipe, ipe, 0, 0, eae, eae, 0, 0, eee, eee))
 
 # Save the results
 with open('water_eno.dat', 'w') as f:
-    f.write('nvir_act ip_delta_emp2 delta_eomipmpe ipe ipe+delta_eomipmpe ea_delta_emp2 delta_eomeampe eae eae+delta_eomeampe\n')
+    f.write('nvir_act ip_delta_emp2 delta_eomipmpe ipe ipe+delta_eomipmpe ea_delta_emp2 delta_eomeampe eae eae+delta_eomeampe ee_delta_emp2 delta_eomeempe eee eee+delta_eomeempe\n')
     for r in results:
-        f.write('%d %f %f %f %f %f %f %f %f\n' % r)
+        f.write('%d %f %f %f %f %f %f %f %f %f %f %f %f\n' % r)
 
 # Print the results
 for r in results:
-    print('%d %f %f %f %f %f %f %f %f' % r)
+    print('%d %f %f %f %f %f %f %f %f %f %f %f %f' % r)
 
